@@ -63,7 +63,7 @@ class NetCutApp extends StatelessWidget {
           brightness: Brightness.light,
         ),
         textTheme: GoogleFonts.poppinsTextTheme(),
-        cardTheme: CardTheme(
+        cardTheme: CardThemeData(
           elevation: 4,
           shadowColor: Colors.black.withOpacity(0.1),
           shape: RoundedRectangleBorder(
@@ -627,35 +627,37 @@ class DashboardScreen extends StatelessWidget {
           'Server Configuration',
           style: GoogleFonts.poppins(fontWeight: FontWeight.bold),
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Enter your PC\'s IP address:',
-              style: GoogleFonts.poppins(fontSize: 14),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              decoration: InputDecoration(
-                hintText: 'http://192.168.1.100:8000',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Enter your PC\'s IP address:',
+                style: GoogleFonts.poppins(fontSize: 14),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                decoration: InputDecoration(
+                  hintText: 'http://192.168.1.100:8000',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  prefixIcon: const Icon(Icons.computer),
                 ),
-                prefixIcon: const Icon(Icons.computer),
+                keyboardType: TextInputType.url,
               ),
-              keyboardType: TextInputType.url,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Run the backend on your PC and enter the IP shown in the terminal.',
-              style: GoogleFonts.poppins(
-                fontSize: 12,
-                color: AppColors.textSecondary,
+              const SizedBox(height: 8),
+              Text(
+                'Run the backend on your PC and enter the IP shown in the terminal.',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  color: AppColors.textSecondary,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(

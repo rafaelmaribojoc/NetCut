@@ -1,0 +1,26 @@
+{
+  "presets": {
+    "Breakfast": {
+      "start": "07:00",
+      "end": "08:00",
+      "enabled": true
+    },
+    "Lunch": {
+      "start": "12:00",
+      "end": "13:00",
+      "enabled": true
+    },
+    "Dinner": {
+      "start": "19:00",
+      "end": "20:00",
+      "enabled": true
+    },
+    "Bedtime": {
+      "start": "21:00",
+      "end": "06:00",
+      "enabled": true
+    }
+  },
+  "target_mac": "68:58:11:6A:7E:48",
+  "target_name": "192.168.1.1"
+}
