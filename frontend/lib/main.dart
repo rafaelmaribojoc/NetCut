@@ -165,11 +165,19 @@ class NetCutStatus {
 // ============================================================================
 
 class ApiService {
-  static const String baseUrl = 'http://127.0.0.1:8000';
+  // Default to localhost, but can be changed to PC's IP
+  String _baseUrl = 'http://192.168.1.100:8000';  // <- CHANGE THIS TO YOUR PC's IP
+
+  String get baseUrl => _baseUrl;
+  
+  void setBaseUrl(String url) {
+    _baseUrl = url;
+  }
 
   Future<NetCutStatus?> getStatus() async {
     try {
-      final response = await http.get(Uri.parse('$baseUrl/status'));
+      final response = await http.get(Uri.parse('$_baseUrl/status'))
+          .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         return NetCutStatus.fromJson(jsonDecode(response.body));
       }
@@ -182,7 +190,7 @@ class ApiService {
   Future<bool> toggleBlock(bool block) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/toggle_block'),
+        Uri.parse('$_baseUrl/toggle_block'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'block': block}),
       );
@@ -196,7 +204,7 @@ class ApiService {
   Future<bool> setMode(String mode) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/set_mode'),
+        Uri.parse('$_baseUrl/set_mode'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'mode': mode}),
       );
@@ -211,7 +219,7 @@ class ApiService {
       String preset, String start, String end, bool enabled) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/update_schedule'),
+        Uri.parse('$_baseUrl/update_schedule'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'preset': preset,
@@ -229,7 +237,8 @@ class ApiService {
 
   Future<List<DeviceInfo>> scanDevices() async {
     try {
-      final response = await http.get(Uri.parse('$baseUrl/devices'));
+      final response = await http.get(Uri.parse('$_baseUrl/devices'))
+          .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(response.body);
         return data.map((e) => DeviceInfo.fromJson(e)).toList();
@@ -243,7 +252,7 @@ class ApiService {
   Future<bool> setTarget(String mac, String? name) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/target'),
+        Uri.parse('$_baseUrl/target'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'mac': mac, 'name': name}),
       );
@@ -272,6 +281,7 @@ class NetCutProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   bool get isConnected => _isConnected;
   bool get isBlocking => _status?.isBlocking ?? false;
+  String get serverUrl => _api.baseUrl;
 
   NetCutProvider() {
     _startPolling();
@@ -353,6 +363,13 @@ class NetCutProvider extends ChangeNotifier {
     _isLoading = false;
     notifyListeners();
   }
+
+  void setServerUrl(String url) {
+    _api.setBaseUrl(url);
+    _isConnected = false;
+    notifyListeners();
+    refreshStatus();
+  }
 }
 
 // ============================================================================
@@ -430,16 +447,34 @@ class DashboardScreen extends StatelessWidget {
                     ),
                   ),
                   actions: [
-                    // Connection indicator
+                    // Connection indicator - tap to configure server
                     Padding(
-                      padding: const EdgeInsets.only(right: 16),
-                      child: Icon(
-                        provider.isConnected
-                            ? Icons.cloud_done
-                            : Icons.cloud_off,
-                        color: provider.isConnected
-                            ? AppColors.safeDark
-                            : Colors.red,
+                      padding: const EdgeInsets.only(right: 8),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(20),
+                        onTap: () => _showServerConfigDialog(context, provider),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                provider.isConnected
+                                    ? Icons.cloud_done
+                                    : Icons.cloud_off,
+                                color: provider.isConnected
+                                    ? AppColors.safeDark
+                                    : Colors.red,
+                              ),
+                              const SizedBox(width: 4),
+                              Icon(
+                                Icons.settings,
+                                size: 16,
+                                color: AppColors.textSecondary,
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -579,6 +614,63 @@ class DashboardScreen extends StatelessWidget {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => const DeviceSelectorSheet(),
+    );
+  }
+
+  void _showServerConfigDialog(BuildContext context, NetCutProvider provider) {
+    final controller = TextEditingController(text: provider.serverUrl);
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          'Server Configuration',
+          style: GoogleFonts.poppins(fontWeight: FontWeight.bold),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Enter your PC\'s IP address:',
+              style: GoogleFonts.poppins(fontSize: 14),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              decoration: InputDecoration(
+                hintText: 'http://192.168.1.100:8000',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                prefixIcon: const Icon(Icons.computer),
+              ),
+              keyboardType: TextInputType.url,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Run the backend on your PC and enter the IP shown in the terminal.',
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              provider.setServerUrl(controller.text);
+              Navigator.pop(context);
+            },
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
     );
   }
 }

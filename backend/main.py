@@ -2,19 +2,17 @@
 """
 NetCut Parental Control Backend
 ===============================
-A FastAPI backend for network-based parental controls using ARP spoofing.
-Runs on Termux (rooted Android) with Scapy for network manipulation.
-
-Termux-Friendly Version: Uses dataclasses instead of Pydantic to avoid
-pydantic-core/Rust compilation issues.
+A backend for network-based parental controls using ARP spoofing.
+Runs on Windows (as Administrator) or Linux/Termux (with root).
 
 Usage:
-    sudo python main.py
+    Windows: Run as Administrator - python main.py
+    Linux/Termux: sudo python main.py
 
 Requirements:
-    - Rooted Android device
-    - Termux with root-repo
+    - Administrator/root privileges
     - Python 3.8+
+    - Npcap (Windows) or libpcap (Linux)
 """
 
 import threading
@@ -26,6 +24,8 @@ from datetime import datetime
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
+import platform
+import socket
 
 # Use starlette directly for lighter weight
 from starlette.applications import Starlette
@@ -85,11 +85,39 @@ class AppState:
         self.target_name: Optional[str] = None
         self.gateway_ip: Optional[str] = None
         self.gateway_mac: Optional[str] = None
-        self.interface: str = "wlan0"
+        self.interface: str = self._detect_interface()
         self.presets = DEFAULT_PRESETS.copy()
         self.spoof_thread: Optional[threading.Thread] = None
         self.stop_spoofing = threading.Event()
         self.load_config()
+    
+    def _detect_interface(self) -> str:
+        """Auto-detect the active network interface."""
+        system = platform.system()
+        try:
+            if system == "Windows":
+                # On Windows, Scapy uses interface names differently
+                # Get list of interfaces and find the active one
+                from scapy.arch.windows import get_windows_if_list
+                interfaces = get_windows_if_list()
+                for iface in interfaces:
+                    # Look for WiFi or Ethernet with an IP
+                    if iface.get('ips') and any(ip for ip in iface['ips'] if not ip.startswith('169.254')):
+                        print(f"[*] Detected interface: {iface.get('name', 'Unknown')}")
+                        return iface.get('name', '')
+            else:
+                # Linux/Android - try common interface names
+                for iface in ['wlan0', 'eth0', 'en0', 'wlp2s0']:
+                    try:
+                        get_if_addr(iface)
+                        return iface
+                    except:
+                        continue
+        except Exception as e:
+            print(f"[!] Interface detection error: {e}")
+        
+        # Fallback
+        return "wlan0" if system != "Windows" else ""
 
     def load_config(self):
         """Load configuration from file if exists."""
@@ -584,16 +612,33 @@ if __name__ == "__main__":
     
     print("=" * 50)
     print("  NetCut Parental Control Backend")
-    print("  (Termux-Friendly - No Pydantic)")
     print("=" * 50)
     print()
-    print("[!] This script requires ROOT privileges!")
-    print("[*] Run with: sudo python main.py")
+    
+    system = platform.system()
+    if system == "Windows":
+        print("[!] Run this script as ADMINISTRATOR!")
+        print("[!] Make sure Npcap is installed: https://npcap.com/")
+    else:
+        print("[!] Run with: sudo python main.py")
+    
+    # Get local IP for display
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        print(f"[*] Your PC's IP: {local_ip}")
+        print(f"[*] Flutter app should connect to: http://{local_ip}:8000")
+    except:
+        pass
+    
     print()
     
+    # Bind to 0.0.0.0 so phone can connect over LAN
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=8000,
         log_level="info"
     )
