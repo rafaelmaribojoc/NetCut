@@ -51,7 +51,7 @@ cd ~/NetCut/backend
 pip install -r requirements.txt
 
 # Or install manually:
-pip install fastapi uvicorn scapy apscheduler pydantic netifaces
+pip install starlette uvicorn scapy apscheduler
 ```
 
 ### 3. Run the Backend

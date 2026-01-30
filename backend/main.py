@@ -5,6 +5,9 @@ NetCut Parental Control Backend
 A FastAPI backend for network-based parental controls using ARP spoofing.
 Runs on Termux (rooted Android) with Scapy for network manipulation.
 
+Termux-Friendly Version: Uses dataclasses instead of Pydantic to avoid
+pydantic-core/Rust compilation issues.
+
 Usage:
     sudo python main.py
 
@@ -18,13 +21,19 @@ import threading
 import time
 import json
 import os
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+import re
+from datetime import datetime
+from typing import Optional, Dict, List, Any
+from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+# Use starlette directly for lighter weight
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -48,41 +57,21 @@ DEFAULT_PRESETS = {
     "Breakfast": {"start": "07:00", "end": "08:00", "enabled": True},
     "Lunch": {"start": "12:00", "end": "13:00", "enabled": True},
     "Dinner": {"start": "19:00", "end": "20:00", "enabled": True},
-    "Bedtime": {"start": "21:00", "end": "06:00", "enabled": True},  # Crosses midnight
+    "Bedtime": {"start": "21:00", "end": "06:00", "enabled": True},
 }
 
 # ============================================================================
-# Pydantic Models
+# Data Classes (Pydantic-free)
 # ============================================================================
 
-class DeviceInfo(BaseModel):
+@dataclass
+class DeviceInfo:
     mac: str
     ip: str
     name: Optional[str] = None
 
-class ToggleBlockRequest(BaseModel):
-    block: bool
-
-class SetModeRequest(BaseModel):
-    mode: str  # "Breakfast", "Lunch", "Dinner", "Bedtime", or "Manual"
-
-class TargetRequest(BaseModel):
-    mac: str
-    name: Optional[str] = None
-
-class ScheduleUpdate(BaseModel):
-    preset: str
-    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
-    end: str = Field(..., pattern=r"^\d{2}:\d{2}$")
-    enabled: bool = True
-
-class StatusResponse(BaseModel):
-    is_blocking: bool
-    active_mode: Optional[str]
-    target_mac: Optional[str]
-    target_name: Optional[str]
-    presets: Dict
-    next_scheduled_action: Optional[str]
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 # ============================================================================
 # Global State
@@ -127,6 +116,17 @@ class AppState:
         except Exception as e:
             print(f"[!] Failed to save config: {e}")
 
+    def get_status(self) -> dict:
+        """Return current status as dictionary."""
+        return {
+            "is_blocking": self.is_blocking,
+            "active_mode": self.active_mode,
+            "target_mac": self.target_mac,
+            "target_name": self.target_name,
+            "presets": self.presets,
+            "next_scheduled_action": get_next_scheduled_action()
+        }
+
 state = AppState()
 scheduler = BackgroundScheduler()
 
@@ -137,7 +137,6 @@ scheduler = BackgroundScheduler()
 def get_gateway_info() -> tuple:
     """Get gateway IP and MAC address."""
     try:
-        # Get default gateway IP
         gateway_ip = conf.route.route("0.0.0.0")[2]
         gateway_mac = getmacbyip(gateway_ip)
         return gateway_ip, gateway_mac
@@ -157,24 +156,21 @@ def scan_network() -> List[DeviceInfo]:
     devices = []
     try:
         local_ip = get_local_ip()
-        # Derive network range from local IP (assumes /24 subnet)
         network = ".".join(local_ip.split(".")[:-1]) + ".0/24"
         
         print(f"[*] Scanning network: {network}")
         
-        # Create ARP request packet
         arp_request = ARP(pdst=network)
         broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
         packet = broadcast / arp_request
         
-        # Send and receive
         answered, _ = srp(packet, timeout=SCAN_TIMEOUT, verbose=False)
         
         for sent, received in answered:
             device = DeviceInfo(
                 mac=received.hwsrc.upper(),
                 ip=received.psrc,
-                name=None  # Could add hostname resolution here
+                name=None
             )
             devices.append(device)
             
@@ -191,8 +187,6 @@ def scan_network() -> List[DeviceInfo]:
 
 def create_arp_packet(target_ip: str, target_mac: str, spoof_ip: str) -> Ether:
     """Create an ARP response packet for spoofing."""
-    # op=2 means ARP reply
-    # We tell the target that we are the gateway (spoof_ip)
     arp = ARP(
         op=2,
         pdst=target_ip,
@@ -213,13 +207,11 @@ def spoof_target():
     """Continuously send spoofed ARP packets to disconnect target."""
     print(f"[*] Starting ARP spoof against {state.target_mac}")
     
-    # Get target IP from MAC
     target_ip = get_ip_from_mac(state.target_mac)
     if not target_ip:
         print(f"[!] Could not find IP for MAC {state.target_mac}")
         return
     
-    # Get gateway info
     gateway_ip, gateway_mac = get_gateway_info()
     if not gateway_ip or not gateway_mac:
         print("[!] Could not determine gateway")
@@ -233,17 +225,13 @@ def spoof_target():
     
     while not state.stop_spoofing.is_set():
         try:
-            # Spoof target: tell target that WE are the gateway
-            # But we won't forward packets, effectively blocking internet
             packet = create_arp_packet(target_ip, state.target_mac, gateway_ip)
             sendp(packet, verbose=False, iface=state.interface)
             
-            # Also optionally spoof gateway about target
-            # This prevents the gateway from sending to target directly
             gateway_packet = create_arp_packet(gateway_ip, gateway_mac, target_ip)
             sendp(gateway_packet, verbose=False, iface=state.interface)
             
-            time.sleep(1)  # Send every second
+            time.sleep(1)
             
         except Exception as e:
             print(f"[!] Spoof error: {e}")
@@ -256,7 +244,6 @@ def restore_arp(target_ip: str, target_mac: str, gateway_ip: str, gateway_mac: s
     """Restore correct ARP entries to unblock target."""
     print("[*] Restoring ARP tables...")
     try:
-        # Restore target's ARP cache
         packet = Ether(dst=target_mac) / ARP(
             op=2,
             pdst=target_ip,
@@ -266,7 +253,6 @@ def restore_arp(target_ip: str, target_mac: str, gateway_ip: str, gateway_mac: s
         )
         sendp(packet, count=5, verbose=False, iface=state.interface)
         
-        # Restore gateway's ARP cache
         gateway_packet = Ether(dst=gateway_mac) / ARP(
             op=2,
             pdst=gateway_ip,
@@ -322,13 +308,12 @@ def apply_preset(name: str, action: str):
         state.active_mode = name
         start_blocking()
     elif action == "end":
-        if state.active_mode == name:  # Only stop if this preset started it
+        if state.active_mode == name:
             stop_blocking()
             state.active_mode = "Manual"
 
 def setup_scheduler():
     """Configure APScheduler with preset schedules."""
-    # Remove all existing jobs
     scheduler.remove_all_jobs()
     
     for preset_name, times in state.presets.items():
@@ -341,7 +326,6 @@ def setup_scheduler():
         start_hour, start_min = map(int, start_time.split(":"))
         end_hour, end_min = map(int, end_time.split(":"))
         
-        # Schedule start blocking
         scheduler.add_job(
             apply_preset,
             CronTrigger(hour=start_hour, minute=start_min),
@@ -350,7 +334,6 @@ def setup_scheduler():
             replace_existing=True
         )
         
-        # Schedule stop blocking
         scheduler.add_job(
             apply_preset,
             CronTrigger(hour=end_hour, minute=end_min),
@@ -371,93 +354,77 @@ def get_next_scheduled_action() -> Optional[str]:
     return f"{next_job.id} at {next_job.next_run_time.strftime('%H:%M')}"
 
 # ============================================================================
-# FastAPI App
+# Request Helpers
 # ============================================================================
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup and shutdown events."""
-    print("[*] NetCut Backend Starting...")
-    setup_scheduler()
-    scheduler.start()
-    print("[*] Scheduler started")
-    yield
-    print("[*] Shutting down...")
-    stop_blocking()
-    scheduler.shutdown()
+async def get_json_body(request) -> dict:
+    """Parse JSON body from request."""
+    try:
+        return await request.json()
+    except:
+        return {}
 
-app = FastAPI(
-    title="NetCut Parental Control API",
-    description="Network-based parental control using ARP spoofing",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# Allow CORS for Flutter app
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def validate_time_format(time_str: str) -> bool:
+    """Validate HH:MM time format."""
+    return bool(re.match(r"^\d{2}:\d{2}$", time_str))
 
 # ============================================================================
-# API Endpoints
+# API Endpoints (Starlette)
 # ============================================================================
 
-@app.get("/")
-async def root():
+async def root(request):
     """Health check endpoint."""
-    return {"status": "ok", "message": "NetCut Backend Running"}
+    return JSONResponse({"status": "ok", "message": "NetCut Backend Running"})
 
-@app.get("/status", response_model=StatusResponse)
-async def get_status():
+async def get_status(request):
     """Get current blocking status and configuration."""
-    return StatusResponse(
-        is_blocking=state.is_blocking,
-        active_mode=state.active_mode,
-        target_mac=state.target_mac,
-        target_name=state.target_name,
-        presets=state.presets,
-        next_scheduled_action=get_next_scheduled_action()
-    )
+    return JSONResponse(state.get_status())
 
-@app.post("/toggle_block")
-async def toggle_block(request: ToggleBlockRequest):
+async def toggle_block(request):
     """Manual override: immediately block or unblock target."""
+    body = await get_json_body(request)
+    block = body.get("block", False)
+    
     if not state.target_mac:
-        raise HTTPException(status_code=400, detail="No target MAC address set")
+        return JSONResponse(
+            {"error": "No target MAC address set"},
+            status_code=400
+        )
     
     state.active_mode = "Manual"
     
-    if request.block:
+    if block:
         success = start_blocking()
     else:
         success = stop_blocking()
     
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to toggle block")
+        return JSONResponse(
+            {"error": "Failed to toggle block"},
+            status_code=500
+        )
     
-    return {
+    return JSONResponse({
         "success": True,
         "is_blocking": state.is_blocking,
         "message": f"Target {'BLOCKED' if state.is_blocking else 'UNBLOCKED'}"
-    }
+    })
 
-@app.post("/set_mode")
-async def set_mode(request: SetModeRequest):
+async def set_mode(request):
     """Activate a preset schedule mode."""
-    mode = request.mode
+    body = await get_json_body(request)
+    mode = body.get("mode", "")
     
     if mode not in state.presets and mode != "Manual":
-        raise HTTPException(status_code=400, detail=f"Unknown mode: {mode}")
+        return JSONResponse(
+            {"error": f"Unknown mode: {mode}"},
+            status_code=400
+        )
     
     if mode == "Manual":
         state.active_mode = "Manual"
-        return {"success": True, "active_mode": mode}
+        return JSONResponse({"success": True, "active_mode": mode})
     
-    # Check if we should be blocking based on current time
     preset = state.presets[mode]
     now = datetime.now()
     current_time = now.strftime("%H:%M")
@@ -465,7 +432,6 @@ async def set_mode(request: SetModeRequest):
     start_time = preset["start"]
     end_time = preset["end"]
     
-    # Handle overnight presets (e.g., Bedtime 21:00 - 06:00)
     if start_time > end_time:
         should_block = current_time >= start_time or current_time < end_time
     else:
@@ -478,67 +444,136 @@ async def set_mode(request: SetModeRequest):
     else:
         stop_blocking()
     
-    return {
+    return JSONResponse({
         "success": True,
         "active_mode": mode,
         "is_blocking": state.is_blocking,
         "message": f"Mode set to {mode}" + (" (currently blocking)" if should_block else "")
-    }
+    })
 
-@app.post("/update_schedule")
-async def update_schedule(request: ScheduleUpdate):
+async def update_schedule(request):
     """Update a preset schedule's times."""
-    if request.preset not in state.presets:
-        raise HTTPException(status_code=400, detail=f"Unknown preset: {request.preset}")
+    body = await get_json_body(request)
+    preset = body.get("preset", "")
+    start = body.get("start", "")
+    end = body.get("end", "")
+    enabled = body.get("enabled", True)
     
-    state.presets[request.preset] = {
-        "start": request.start,
-        "end": request.end,
-        "enabled": request.enabled
+    if preset not in state.presets:
+        return JSONResponse(
+            {"error": f"Unknown preset: {preset}"},
+            status_code=400
+        )
+    
+    if not validate_time_format(start) or not validate_time_format(end):
+        return JSONResponse(
+            {"error": "Invalid time format. Use HH:MM"},
+            status_code=400
+        )
+    
+    state.presets[preset] = {
+        "start": start,
+        "end": end,
+        "enabled": enabled
     }
     
     state.save_config()
     setup_scheduler()
     
-    return {
+    return JSONResponse({
         "success": True,
-        "preset": request.preset,
-        "schedule": state.presets[request.preset]
-    }
+        "preset": preset,
+        "schedule": state.presets[preset]
+    })
 
-@app.get("/devices", response_model=List[DeviceInfo])
-async def get_devices():
+async def get_devices(request):
     """Scan and list all devices on the network."""
     devices = scan_network()
-    return devices
+    return JSONResponse([d.to_dict() for d in devices])
 
-@app.post("/target")
-async def set_target(request: TargetRequest):
+async def set_target(request):
     """Set the target device MAC address."""
-    state.target_mac = request.mac.upper()
-    state.target_name = request.name
+    body = await get_json_body(request)
+    mac = body.get("mac", "")
+    name = body.get("name")
+    
+    if not mac:
+        return JSONResponse(
+            {"error": "MAC address required"},
+            status_code=400
+        )
+    
+    state.target_mac = mac.upper()
+    state.target_name = name
     state.save_config()
     
-    return {
+    return JSONResponse({
         "success": True,
         "target_mac": state.target_mac,
         "target_name": state.target_name
-    }
+    })
 
-@app.delete("/target")
-async def clear_target():
+async def clear_target(request):
     """Clear the target device."""
     stop_blocking()
     state.target_mac = None
     state.target_name = None
     state.save_config()
     
-    return {"success": True, "message": "Target cleared"}
+    return JSONResponse({"success": True, "message": "Target cleared"})
 
-@app.get("/presets")
-async def get_presets():
+async def get_presets(request):
     """Get all preset schedules."""
-    return state.presets
+    return JSONResponse(state.presets)
+
+# ============================================================================
+# App Lifespan
+# ============================================================================
+
+@asynccontextmanager
+async def lifespan(app):
+    """Startup and shutdown events."""
+    print("[*] NetCut Backend Starting...")
+    setup_scheduler()
+    scheduler.start()
+    print("[*] Scheduler started")
+    yield
+    print("[*] Shutting down...")
+    stop_blocking()
+    scheduler.shutdown()
+
+# ============================================================================
+# Create Starlette App
+# ============================================================================
+
+routes = [
+    Route("/", root, methods=["GET"]),
+    Route("/status", get_status, methods=["GET"]),
+    Route("/toggle_block", toggle_block, methods=["POST"]),
+    Route("/set_mode", set_mode, methods=["POST"]),
+    Route("/update_schedule", update_schedule, methods=["POST"]),
+    Route("/devices", get_devices, methods=["GET"]),
+    Route("/target", set_target, methods=["POST"]),
+    Route("/target", clear_target, methods=["DELETE"]),
+    Route("/presets", get_presets, methods=["GET"]),
+]
+
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+]
+
+app = Starlette(
+    debug=False,
+    routes=routes,
+    middleware=middleware,
+    lifespan=lifespan
+)
 
 # ============================================================================
 # Main Entry Point
@@ -549,13 +584,13 @@ if __name__ == "__main__":
     
     print("=" * 50)
     print("  NetCut Parental Control Backend")
+    print("  (Termux-Friendly - No Pydantic)")
     print("=" * 50)
     print()
     print("[!] This script requires ROOT privileges!")
     print("[*] Run with: sudo python main.py")
     print()
     
-    # Start the server
     uvicorn.run(
         app,
         host="127.0.0.1",

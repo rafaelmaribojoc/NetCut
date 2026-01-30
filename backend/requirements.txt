@@ -1,9 +1,8 @@
-# NetCut Backend Dependencies
+# NetCut Backend Dependencies (Termux-Friendly)
+# No Pydantic - avoids Rust compilation issues
 # Install with: pip install -r requirements.txt
 
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
+starlette>=0.32.0
+uvicorn>=0.24.0
 scapy>=2.5.0
 apscheduler>=3.10.0
-pydantic>=2.5.0
-netifaces>=0.11.0
